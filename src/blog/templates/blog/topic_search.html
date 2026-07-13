@@ -1,0 +1,21 @@
+{% extends 'blog/base.html' %}
+{% block title %}Search — The Daily Thomas Edison{% endblock %}
+{% block content %}
+    <h2 style="margin-bottom:1rem; border-bottom:2px solid #1a1a1a; padding-bottom:0.5rem;">Search Topics</h2>
+    <form class="search" method="get" action="{% url 'blog:topic_search' %}">
+        <input type="text" name="q" value="{{ query }}" placeholder="Search topics by name or description..." autofocus>
+        <button type="submit">Search</button>
+    </form>
+    {% if query %}
+        <p class="meta">{{ results.count }} result{{ results.count|pluralize }} for &ldquo;{{ query }}&rdquo;</p>
+        {% for topic in results %}
+            <article class="topic-card">
+                <h2><a href="{% url 'blog:topic_detail' topic.TopicID %}">{{ topic.TopicName }}</a></h2>
+                <p class="meta">Published {{ topic.TopicPublishingDate }}</p>
+                <p>{{ topic.TopicDescription|truncatewords:30 }}</p>
+            </article>
+        {% empty %}
+            <p>No topics matched your search.</p>
+        {% endfor %}
+    {% endif %}
+{% endblock %}

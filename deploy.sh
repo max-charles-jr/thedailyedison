@@ -18,11 +18,11 @@ docker push "$IMAGE_URI"
 # 2. Deploy / update the infrastructure stack.
 aws cloudformation deploy \
   --stack-name edison-blog \
-  --template-file infra/cloudformation.yaml \
+  --template-file cloudformation.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
       ContainerImage="$IMAGE_URI" \
-      KeyPairName=edison-key
+      KeyPairName=mcc
 
 # 3. Run migrations and seed via a one-off task on an app instance.
 INSTANCE=$(aws autoscaling describe-auto-scaling-instances \
@@ -32,8 +32,9 @@ aws ssm send-command \
   --document-name "AWS-RunShellScript" \
   --parameters 'commands=["docker exec edison python manage.py migrate --noinput"]'
 
-# 4. Sync static assets to S3 for the CloudFront static origin.
-python manage.py collectstatic --noinput
-aws s3 sync staticfiles/ s3://edison-static-assets/ --delete
+# 4. Sync static assets to S3 under the /static/ prefix, matching CloudFront's
+#    /static/* path pattern and Django's DJANGO_STATIC_URL.
+python3 manage.py collectstatic --noinput
+aws s3 sync staticfiles/ s3://edison-static-assets/static/ --delete
 
 echo "Deployment complete: $IMAGE_URI"

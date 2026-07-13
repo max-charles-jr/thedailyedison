@@ -1,0 +1,19 @@
+{% extends 'blog/base.html' %}
+{% block title %}{{ topic.TopicName }} — The Daily Thomas Edison{% endblock %}
+{% block content %}
+    <a class="back" href="{% url 'blog:topic_list' %}">&larr; Back to all topics</a>
+    <article class="topic-card">
+        <h2>{{ topic.TopicName }}</h2>
+        <p class="meta">Published {{ topic.TopicPublishingDate }}</p>
+        <p>{{ topic.TopicDescription }}</p>
+    </article>
+    <h3 style="margin:1.5rem 0 0.5rem;">Comments</h3>
+    {% for comment in topic.comments.all %}
+        <div class="comment">
+            <div class="who">{{ comment.CommenterName }}</div>
+            <div>{{ comment.CommentText }}</div>
+        </div>
+    {% empty %}
+        <p>No comments yet.</p>
+    {% endfor %}
+{% endblock %}

@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: '2010-09-09'
+AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   The Daily Thomas Edison - multi-tier Django blog.
   VPC, Application Load Balancer, EC2 Auto Scaling Group, and RDS MySQL (Multi-AZ).
@@ -10,9 +10,16 @@ Parameters:
   ContainerImage:
     Type: String
     Description: ECR image URI for the Django application.
+  StaticAssetsDomainName:
+    Type: String
+    Default: edison-blog.maxcharlesjr.com
+    Description: Custom domain for the CloudFront distribution serving static assets.
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Default: ZSJJ5EJI2M7PK
+    Description: Existing Route53 hosted zone (maxcharlesjr.com) used for ACM DNS validation and the CloudFront alias record.
 
 Resources:
-
   # ---------- Networking ----------
   VPC:
     Type: AWS::EC2::VPC
@@ -27,7 +34,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [0, !GetAZs ""]
       MapPublicIpOnLaunch: true
 
   PublicSubnetB:
@@ -35,7 +42,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.2.0/24
-      AvailabilityZone: !Select [1, !GetAZs '']
+      AvailabilityZone: !Select [1, !GetAZs ""]
       MapPublicIpOnLaunch: true
 
   PrivateSubnetA:
@@ -43,14 +50,79 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.11.0/24
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [0, !GetAZs ""]
 
   PrivateSubnetB:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.12.0/24
-      AvailabilityZone: !Select [1, !GetAZs '']
+      AvailabilityZone: !Select [1, !GetAZs ""]
+
+  MyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MyVpcInternetGateway
+
+  MyVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref MyInternetGateway
+
+  # ---------- Route tables ----------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: edison-public-rt }]
+
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: MyVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref MyInternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: edison-private-rt }]
+
+  PrivateNatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NatInstance
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
 
   # ---------- Security groups ----------
   ALBSecurityGroup:
@@ -60,23 +132,60 @@ Resources:
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
-        - { IpProtocol: tcp, FromPort: 80,  ToPort: 80,  CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
 
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow app traffic only from the load balancer.
+      GroupDescription: Allow app traffic from the load balancer and SSH from the jump server.
       VpcId: !Ref VPC
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 8000, ToPort: 8000, SourceSecurityGroupId: !Ref ALBSecurityGroup }
+        - {
+            IpProtocol: tcp,
+            FromPort: 8000,
+            ToPort: 8000,
+            SourceSecurityGroupId: !Ref ALBSecurityGroup,
+          }
+        - {
+            IpProtocol: tcp,
+            FromPort: 22,
+            ToPort: 22,
+            SourceSecurityGroupId: !Ref JumpServerSecurityGroup,
+          }
 
   DBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow MySQL only from the application tier.
+      GroupDescription: Allow MySQL from the application tier and the jump server.
       VpcId: !Ref VPC
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref AppSecurityGroup }
+        - {
+            IpProtocol: tcp,
+            FromPort: 3306,
+            ToPort: 3306,
+            SourceSecurityGroupId: !Ref AppSecurityGroup,
+          }
+        - {
+            IpProtocol: tcp,
+            FromPort: 3306,
+            ToPort: 3306,
+            SourceSecurityGroupId: !Ref JumpServerSecurityGroup,
+          }
+
+  NatSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all traffic from the private subnets to the NAT instance.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: "-1", CidrIp: 10.0.11.0/24 }
+        - { IpProtocol: "-1", CidrIp: 10.0.12.0/24 }
+
+  JumpServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Jump server (access via SSM Session Manager only; no inbound rules needed).
+      VpcId: !Ref VPC
 
   # ---------- Load balancer ----------
   LoadBalancer:
@@ -84,8 +193,8 @@ Resources:
     Properties:
       Scheme: internet-facing
       Type: application
-      Subnets: [ !Ref PublicSubnetA, !Ref PublicSubnetB ]
-      SecurityGroups: [ !Ref ALBSecurityGroup ]
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref ALBSecurityGroup]
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -97,7 +206,7 @@ Resources:
       HealthCheckIntervalSeconds: 30
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      Matcher: { HttpCode: '200' }
+      Matcher: { HttpCode: "200" }
 
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -113,7 +222,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal: { Service: ec2.amazonaws.com }
@@ -123,25 +232,36 @@ Resources:
       Policies:
         - PolicyName: edison-app-policy
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: [ ecr:GetAuthorizationToken, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer ]
-                Resource: '*'
+                Action:
+                  [
+                    ecr:GetAuthorizationToken,
+                    ecr:BatchGetImage,
+                    ecr:GetDownloadUrlForLayer,
+                    ecr:BatchCheckLayerAvailability,
+                  ]
+                Resource: "*"
               - Effect: Allow
-                Action: [ logs:CreateLogStream, logs:PutLogEvents ]
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
                 Resource: arn:aws:logs:*:*:log-group:/edison/app:*
               - Effect: Allow
-                Action: [ s3:GetObject ]
+                Action: [s3:GetObject]
                 Resource: arn:aws:s3:::edison-static-assets/*
               - Effect: Allow
-                Action: [ secretsmanager:GetSecretValue ]
-                Resource: arn:aws:secretsmanager:*:*:secret:edison/db-*
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+              - Effect: Allow
+                # The master user secret is encrypted with MyRDSKmsKey, so decrypting
+                # it via GetSecretValue also requires kms:Decrypt on that key.
+                Action: [kms:Decrypt, kms:DescribeKey]
+                Resource: !GetAtt MyRDSKmsKey.Arn
 
   AppInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      Roles: [ !Ref AppInstanceRole ]
+      Roles: [!Ref AppInstanceRole]
 
   # ---------- Auto Scaling ----------
   LaunchTemplate:
@@ -150,25 +270,37 @@ Resources:
       LaunchTemplateData:
         InstanceType: t3.small
         KeyName: !Ref KeyPairName
-        SecurityGroupIds: [ !Ref AppSecurityGroup ]
+        ImageId: "ami-0fd6240f599091088"
+        SecurityGroupIds: [!Ref AppSecurityGroup]
         IamInstanceProfile: { Name: !Ref AppInstanceProfile }
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-            docker run -d -p 8000:8000 \
+            yum update -y
+            yum install docker -y
+            systemctl enable docker
+            systemctl start docker
+            aws ecr get-login-password --region ${AWS::Region} \
+              | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+            docker run -d --name edison -p 8000:8000 \
+              -e AWS_REGION=${AWS::Region} \
+              -e DJANGO_DEBUG=False \
+              -e DJANGO_SECURE_SSL_REDIRECT=False \
+              -e DJANGO_CSRF_TRUSTED_ORIGINS=https://${StaticAssetsDomainName} \
+              -e DJANGO_STATIC_URL=https://${StaticAssetsDomainName}/static/ \
               -e DB_ENGINE=mysql \
               -e DB_HOST=${Database.Endpoint.Address} \
-              -e DB_SECRET_ARN=edison/db-password \
+              -e DB_SECRET_ARN=${Database.MasterUserSecret.SecretArn} \
               ${ContainerImage}
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      MinSize: '2'
-      MaxSize: '6'
-      DesiredCapacity: '2'
-      VPCZoneIdentifier: [ !Ref PrivateSubnetA, !Ref PrivateSubnetB ]
-      TargetGroupARNs: [ !Ref TargetGroup ]
+      MinSize: "2"
+      MaxSize: "6"
+      DesiredCapacity: "2"
+      VPCZoneIdentifier: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      TargetGroupARNs: [!Ref TargetGroup]
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
@@ -185,12 +317,88 @@ Resources:
           PredefinedMetricType: ASGAverageCPUUtilization
         TargetValue: 60.0
 
+  # ---------- NAT instance (outbound internet for the private subnets) ----------
+  NatInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds: [!Ref NatSecurityGroup]
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+      SourceDestCheck: false
+      Tags: [{ Key: Name, Value: edison-nat-instance }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+          sysctl -p
+          /sbin/iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+          /sbin/iptables-save > /etc/sysconfig/iptables
+          cat <<'EOF' >> /etc/rc.d/rc.local
+          iptables-restore < /etc/sysconfig/iptables
+          EOF
+          chmod +x /etc/rc.d/rc.local
+
+  # ---------- Jump server (Session Manager access to the private subnets) ----------
+  JumpServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds: [!Ref JumpServerSecurityGroup]
+      KeyName: !Ref KeyPairName
+      ImageId: "ami-0fd6240f599091088"
+      IamInstanceProfile: !Ref AppInstanceProfile
+      Tags: [{ Key: Name, Value: edison-jump-server }]
+
+  # 1. Create the Customer Managed KMS Key
+  MyRDSKmsKey:
+    Type: "AWS::KMS::Key"
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: "KMS Key for encrypting RDS database storage"
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "rds-kms-policy"
+        Statement:
+          # Allow administrative control to the root account
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          # Explicitly permit the RDS service to use this key
+          - Sid: "Allow RDS Service Usage"
+            Effect: "Allow"
+            Principal:
+              Service: "rds.amazonaws.com"
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:CreateGrant"
+              - "kms:ListGrants"
+              - "kms:DescribeKey"
+            Resource: "*"
+
+  # Optional: Create an Alias for the KMS Key for easier identification
+  MyRDSKmsKeyAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: "alias/rds-storage-key"
+      TargetKeyId: !Ref MyRDSKmsKey
+
   # ---------- Database ----------
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: Private subnets for RDS.
-      SubnetIds: [ !Ref PrivateSubnetA, !Ref PrivateSubnetB ]
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
 
   Database:
     Type: AWS::RDS::DBInstance
@@ -198,19 +406,128 @@ Resources:
     UpdateReplacePolicy: Snapshot
     Properties:
       Engine: mysql
-      EngineVersion: '8.0.42'
+      EngineVersion: "8.0.42"
       DBInstanceClass: db.t3.small
-      AllocatedStorage: '20'
+      AllocatedStorage: "20"
       DBName: dailyedison
       MasterUsername: admin
-      MasterUserPassword: '{{resolve:secretsmanager:edison/db-password:SecretString:password}}'
+      ManageMasterUserPassword: true
+      #MasterUserPassword: "{{resolve:secretsmanager:edison/db-password:SecretString:password}}"
+      MasterUserSecret:
+        KmsKeyId: !Ref MyRDSKmsKey
       MultiAZ: true
       StorageEncrypted: true
       DBSubnetGroupName: !Ref DBSubnetGroup
-      VPCSecurityGroups: [ !Ref DBSecurityGroup ]
+      VPCSecurityGroups: [!Ref DBSecurityGroup]
+
+  # ---------- Static assets (S3 + CloudFront + Route53) ----------
+  StaticAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: edison-static-assets
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: [{ Key: Name, Value: edison-static-assets }]
+
+  StaticAssetsOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: edison-static-assets-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  StaticAssetsCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref StaticAssetsDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref StaticAssetsDomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  StaticAssetsDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: The Daily Thomas Edison - CDN in front of the ALB; /static/* served from S3.
+        Aliases: [!Ref StaticAssetsDomainName]
+        Origins:
+          - Id: edison-static-assets-origin
+            DomainName: !GetAtt StaticAssetsBucket.RegionalDomainName
+            OriginAccessControlId: !Ref StaticAssetsOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: edison-alb-origin
+            DomainName: !GetAtt LoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: edison-alb-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # Managed-CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
+        CacheBehaviors:
+          - PathPattern: /static/*
+            TargetOriginId: edison-static-assets-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+        ViewerCertificate:
+          AcmCertificateArn: !Ref StaticAssetsCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+
+  StaticAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticAssetsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${StaticAssetsBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${StaticAssetsDistribution.Id}"
+
+  StaticAssetsDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref StaticAssetsDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt StaticAssetsDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2 # Fixed CloudFront alias hosted zone ID (same for all distributions)
+        EvaluateTargetHealth: false
 
 Outputs:
   LoadBalancerDNS:
     Value: !GetAtt LoadBalancer.DNSName
   DatabaseEndpoint:
     Value: !GetAtt Database.Endpoint.Address
+  JumpServerInstanceId:
+    Description: Connect via Session Manager in the AWS console to reach the private EC2 and RDS resources.
+    Value: !Ref JumpServerInstance
+  StaticAssetsBucketName:
+    Value: !Ref StaticAssetsBucket
+  StaticAssetsDistributionDomainName:
+    Value: !GetAtt StaticAssetsDistribution.DomainName
+  StaticAssetsURL:
+    Value: !Sub "https://${StaticAssetsDomainName}"

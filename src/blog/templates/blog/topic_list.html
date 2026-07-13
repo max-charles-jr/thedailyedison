@@ -1,0 +1,14 @@
+{% extends 'blog/base.html' %}
+{% block title %}All Topics — The Daily Thomas Edison{% endblock %}
+{% block content %}
+    <h2 style="margin-bottom:1.5rem; border-bottom:2px solid #1a1a1a; padding-bottom:0.5rem;">All Blog Topics</h2>
+    {% for topic in topics %}
+        <article class="topic-card">
+            <h2><a href="{% url 'blog:topic_detail' topic.TopicID %}">{{ topic.TopicName }}</a></h2>
+            <p class="meta">Published {{ topic.TopicPublishingDate }} &middot; {{ topic.comments.count }} comment{{ topic.comments.count|pluralize }}</p>
+            <p>{{ topic.TopicDescription|truncatewords:40 }}</p>
+        </article>
+    {% empty %}
+        <p>No topics yet.</p>
+    {% endfor %}
+{% endblock %}

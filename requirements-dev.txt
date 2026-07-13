@@ -1,0 +1,5 @@
+# Local development dependencies. Mirrors requirements.txt but omits
+# mysqlclient, which needs native MySQL headers and isn't required
+# locally: settings.py falls back to SQLite unless DB_ENGINE=mysql is set.
+Django>=5.0,<6.1
+gunicorn>=21.2.0
